@@ -20,7 +20,7 @@ except Exception:
 # Theming and Page Config
 # ============================================
 st.set_page_config(
-    page_title="Prolonged Hospital Stay Risk Calculator (SCI)",
+    page_title="Prolonged Hospital Stay Risk Calculator (pSCI)",
     layout="wide",
     page_icon="🧠",
     initial_sidebar_state="expanded",
@@ -83,7 +83,7 @@ st.markdown(
 st.markdown(
     """
     <div class="app-hero">
-      <h1>🧠 Prolonged Hospital Stay Risk Calculator (Penetrating Spinal Cord Injury)</h1>
+      <h1>🧠 Prolonged Hospital Stay Risk Calculator (Penetrating SCI)</h1>
       <p>Estimate risk, flag intervention thresholds, and explain drivers with Visualization.</p>
     </div>
     """,
@@ -817,4 +817,5 @@ st.markdown("---")
 st.markdown(
     "Built for the pSCI Prolonged LOS Prediction project. "
     "Binary features render as radio buttons; 3+ category features use dropdowns."
+
 )
