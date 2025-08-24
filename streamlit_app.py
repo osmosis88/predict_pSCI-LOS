@@ -96,10 +96,7 @@ HUMAN_MAP = {
     'num__ageyears': 'Age (years)',
     'num__hospitalarrivalhrs': 'Time from injury to hospital arrival (hours)',
 
-    'cat__hospdischargedisposition_recoded_Deceased': 'Hospital discharge: Deceased',
-    'cat__hospdischargedisposition_recoded_Home': 'Hospital discharge: Home',
-    'cat__hospdischargedisposition_recoded_Rehab/Short_or_LongTermCare': 'Hospital discharge: Rehab/Short- or Long-Term Care',
-    'cat__hospdischargedisposition_recoded_OtherInstitution': 'Hospital discharge: Other institution',
+   
 
     'cat__eddischargedisposition_recoded_Deceased': 'ED discharge: Deceased',
     'cat__eddischargedisposition_recoded_Operating Room': 'ED discharge: Operating Room',
@@ -154,13 +151,7 @@ def _map_human_readable(raw_feature_names: List[str]) -> List[str]:
 # Hand‑curated categorical choices (extend as needed)
 # ============================================
 PREFERRED_CATS: Dict[str, List[str]] = {
-    "hospdischargedisposition_recoded": [
-        "Rehab/Short_or_LongTermCare",
-        "Unknown",
-        "Home",
-        "Deceased",
-        "OtherInstitution",
-    ],
+  
     "eddischargedisposition_recoded": [
         "ICU",
         "Operating Room",
@@ -187,13 +178,7 @@ PREFERRED_CATS: Dict[str, List[str]] = {
 
 # Friendly display labels for confusing raw values
 DISPLAY_LABELS: Dict[str, Dict[str, str]] = {
-    "hospdischargedisposition_recoded": {
-        "Rehab/Short_or_LongTermCare": "Rehabilitation / Long-Term Care",
-        "Unknown": "Unknown / Not Recorded",
-        "Home": "Home",
-        "Deceased": "Deceased",
-        "OtherInstitution": "Other Institution (SNF, Facility)",
-    },
+    
     "eddischargedisposition_recoded": {
         "ICU": "Admitted to ICU",
         "Operating Room": "Taken to Operating Room",
@@ -234,7 +219,7 @@ FRIENDLY_FEATURE_NAMES = {
     "iss": "Injury Severity Score (ISS)",
     "ageyears": "Age (years)",
     "totalventdays": "Total Ventilator Days",
-    "hospdischargedisposition_recoded": "Hospital Discharge Disposition",
+    
     "eddischargedisposition_recoded": "ED Discharge Disposition",
     "pressureulcer": "Pressure Ulcer",
     "primarymethodpayment_recoded": "Primary Method of Payment",
@@ -254,10 +239,76 @@ NUMERIC_HINTS = {
 # ============================================
 # Utilities
 # ============================================
+# --- replace your existing load_model with this ---
+import os, io, joblib
+import streamlit as st
+
 @st.cache_resource
-def load_model(pkl_path: str = "final_model_xgb_reduced.pkl"):
-    model = joblib.load(pkl_path)
+def load_model(pkl_path: str = "final_model_xgb_reduced.pkl", *, _mtime: float = None):
+    """
+    Cache-busted loader: _mtime is part of the cache key so that replacing the file invalidates the cache.
+    """
+    # If not provided, compute mtime here
+    if _mtime is None:
+        try:
+            _mtime = os.path.getmtime(pkl_path)
+        except FileNotFoundError:
+            st.error(f"Model file not found at: {pkl_path}")
+            st.stop()
+
+    # Read bytes then load (works even if the file is being replaced)
+    with open(pkl_path, "rb") as f:
+        data = f.read()
+    model = joblib.load(io.BytesIO(data))
     return model
+def _expected_model_n_features(clf) -> int:
+    """Best-effort: how many features the booster expects."""
+    # Try sklearn attribute
+    n = getattr(clf, "n_features_in_", None)
+    if isinstance(n, (int, np.integer)) and n > 0:
+        return int(n)
+    # Try raw booster
+    try:
+        booster = clf.get_booster()
+        nf = booster.num_features()
+        if isinstance(nf, (int, np.integer)) and nf > 0:
+            return int(nf)
+    except Exception:
+        pass
+    return None
+
+
+def _align_to_expected_features(X_proc: np.ndarray,
+                                feature_names: List[str],
+                                expected: int) -> Tuple[np.ndarray, List[str], str]:
+    """
+    If the current transformed matrix has a different number of columns than
+    the booster expects, trim or zero-pad to match. Returns (X_aligned, names_aligned, note).
+    """
+    curr = X_proc.shape[1]
+    if expected is None or expected == curr:
+        return X_proc, feature_names, ""
+
+    note = ""
+    if curr > expected:
+        # Trim extra trailing columns (common after adding categories)
+        X_aligned = X_proc[:, :expected]
+        names_aligned = feature_names[:expected]
+        note = f"Aligned SHAP input by trimming {curr - expected} extra feature(s)."
+    else:
+        # Zero-pad missing columns (common after dropping categories)
+        pad = expected - curr
+        X_pad = np.zeros((X_proc.shape[0], pad), dtype=X_proc.dtype)
+        X_aligned = np.hstack([X_proc, X_pad])
+        names_aligned = feature_names + [f"(missing_{i})" for i in range(pad)]
+        note = f"Aligned SHAP input by zero-padding {pad} missing feature(s)."
+
+    return X_aligned, names_aligned, note
+
+def _map_human_readable(raw_feature_names: List[str]) -> List[str]:
+    # Uses your HUMAN_MAP dict; fall back to raw names if not found
+    return [HUMAN_MAP.get(name, name) for name in raw_feature_names]
+
 
 
 def get_feature_schema(model) -> Tuple[List[str], List[str], Dict[str, List[str]]]:
@@ -477,11 +528,12 @@ with single_tab:
     st.subheader("📋 Patient Inputs")
     st.caption("Missing entries will be imputed by the model's preprocessing pipeline. Unknown categories are ignored.")
 
+    # --- Form: collect inputs ---
     with st.form("single_form"):
         grid = st.columns(3)
         record: Dict[str, Any] = {}
 
-        # Numeric inputs first (as per ColumnTransformer order)
+        # Numeric inputs first
         for i, col in enumerate(num_cols):
             with grid[i % 3]:
                 hints = NUMERIC_HINTS.get(col, {})
@@ -522,7 +574,7 @@ with single_tab:
 
         submitted = st.form_submit_button("Predict")
 
-    # Handle submission outside the form
+    # --- Handle submission outside the form ---
     if submitted:
         X_input = ensure_dataframe(feature_order, record)
         try:
@@ -531,10 +583,7 @@ with single_tab:
             st.metric("Predicted probability (positive)", f"{proba[0]:.4f}")
 
             # Friendly, patient-facing risk classification with emoji
-            if int(pred[0]) == 1:
-                label_text = "🚨 At risk for prolonged stay"
-            else:
-                label_text = "✅ Not at risk for prolonged stay"
+            label_text = "🚨 At risk for prolonged stay" if int(pred[0]) == 1 else "✅ Not at risk for prolonged stay"
             st.metric("Risk classification", label_text)
 
             # Fancy risk card
@@ -564,61 +613,81 @@ with single_tab:
             with st.expander("Show input row dataframe"):
                 st.dataframe(X_input)
 
-            # SHAP explanation – waterfall plot with human-readable feature names
+            # --- SHAP explanation – WATERFALL, robust to schema drift ---
             st.markdown("### Explain this prediction (SHAP)")
-
-            # Local helper to prettify model-space feature names
-            def _friendly_feature_names(raw_feature_names: List[str]) -> List[str]:
-                """
-                Map model-space names (e.g., 'cat__hospdischargedisposition_recoded_Rehab/Short_or_LongTermCare')
-                to friendly labels (e.g., 'Hospital Discharge Disposition = Rehabilitation / Long-Term Care').
-                """
-                friendly = []
-                for feat in raw_feature_names:
-                    name = str(feat)
-                    # Drop ColumnTransformer prefixes like 'num__' or 'cat__'
-                    if "__" in name:
-                        _, name = name.split("__", 1)
-
-                    # If it's an OHE feature => '<col>_<category...>'
-                    parts = name.split("_", 1)
-                    col_key = parts[0]
-                    if col_key in FRIENDLY_FEATURE_NAMES and len(parts) == 2:
-                        cat_val_raw = parts[1]
-                        pretty_col = FRIENDLY_FEATURE_NAMES.get(col_key, col_key)
-                        pretty_val = DISPLAY_LABELS.get(col_key, {}).get(cat_val_raw, cat_val_raw)
-                        friendly.append(f"{pretty_col} = {pretty_val}")
-                    else:
-                        # Likely a numeric feature (or non-OHE)
-                        friendly.append(FRIENDLY_FEATURE_NAMES.get(name, name))
-                return friendly
-
             if not _HAS_SHAP:
                 st.info("Install SHAP to enable explanations: `pip install shap`.")
             else:
                 try:
-                    explainer = _get_shap_explainer(model)
+                    # 1) Transform with the pipeline's preprocessor
                     X_proc, feature_names = _transform_to_model_space(model, X_input)
+                    names = [str(n) for n in feature_names]
+
+                    # 2) Build a FRESH explainer for the current classifier (avoid stale cache)
+                    clf = model.named_steps["clf"]
+                    explainer = shap.TreeExplainer(clf)
+
+                    # 3) Align to booster-expected n_features to avoid (24 vs 28) errors
+                    try:
+                        expected = getattr(clf, "n_features_in_", None)
+                        if expected is None:
+                            expected = clf.get_booster().num_features()
+                    except Exception:
+                        expected = X_proc.shape[1]
+
+                    align_note = ""
+                    curr = X_proc.shape[1]
+                    if expected != curr:
+                        if curr > expected:
+                            # Trim extra trailing columns
+                            X_proc = X_proc[:, :expected]
+                            names = names[:expected]
+                            align_note = f"Aligned SHAP input by trimming {curr - expected} extra feature(s)."
+                        else:
+                            # Zero-pad missing columns
+                            pad = expected - curr
+                            X_pad = np.zeros((X_proc.shape[0], pad), dtype=X_proc.dtype)
+                            X_proc = np.hstack([X_proc, X_pad])
+                            names = names + [f"(missing_{i})" for i in range(pad)]
+                            align_note = f"Aligned SHAP input by zero-padding {pad} missing feature(s)."
+
+                    # 4) Compute SHAP values on the aligned matrix
                     shap_values = explainer.shap_values(X_proc)
 
-                    # Select the vector for the positive class if returned as a list
+                    # Handle binary-class return shape
                     if isinstance(shap_values, list):
                         shap_vec = np.array(shap_values[1][0]) if len(shap_values) > 1 else np.array(shap_values[0][0])
                     else:
                         shap_vec = np.array(shap_values[0])
 
-                    # Base value (expected value). If binary and returns two, use positive class (index 1)
+                    # Base value (use positive class if list-like)
                     base_val = explainer.expected_value
                     if isinstance(base_val, (list, tuple, np.ndarray)):
                         base_val = float(base_val[1] if len(np.atleast_1d(base_val)) > 1 else base_val[0])
                     else:
                         base_val = float(base_val)
 
-                    # Use human-friendly feature names
-                    # Map to human-readable feature names
-                    friendly_names = _map_human_readable([str(n) for n in feature_names])
+                    # 5) Human-readable names (uses your HUMAN_MAP if defined; else fallback)
+                    try:
+                        friendly_names = _map_human_readable(names)
+                    except Exception:
+                        # Fallback: try to prettify by stripping prefixes and mapping categories via DISPLAY_LABELS
+                        friendly_names = []
+                        for feat in names:
+                            name = str(feat)
+                            if "__" in name:
+                                _, name = name.split("__", 1)
+                            parts = name.split("_", 1)
+                            col_key = parts[0]
+                            if col_key in FRIENDLY_FEATURE_NAMES and len(parts) == 2:
+                                cat_val_raw = parts[1]
+                                pretty_col = FRIENDLY_FEATURE_NAMES.get(col_key, col_key)
+                                pretty_val = DISPLAY_LABELS.get(col_key, {}).get(cat_val_raw, cat_val_raw)
+                                friendly_names.append(f"{pretty_col} = {pretty_val}")
+                            else:
+                                friendly_names.append(FRIENDLY_FEATURE_NAMES.get(name, name))
 
-                    # Build SHAP Explanation for a waterfall plot (model-space features)
+                    # 6) Build SHAP Explanation & plot
                     exp = shap.Explanation(
                         values=shap_vec,
                         base_values=base_val,
@@ -630,18 +699,23 @@ with single_tab:
                     shap.plots.waterfall(exp, show=False, max_display=12)
                     st.pyplot(fig)
 
-                    st.caption(
-    "🔎 **How to read this plot:** The baseline on the left is the model’s average prediction. "
-    "Each bar shows how a feature pushed the risk **up** (red, toward prolonged stay) or **down** "
-    "(blue, toward shorter stay) for this patient. The numbers on each bar are SHAP values — "
-    "they quantify the size of that feature’s contribution. The steps add up to the final predicted probability."
-)
+                    caption = (
+                        "🔎 **How to read this plot:** The baseline on the left is the model’s average prediction. "
+                        "Each bar shows how a feature pushed the risk **up** (red, toward prolonged stay) or **down** "
+                        "(blue, toward shorter stay) for this patient. The numbers on each bar are SHAP values — "
+                        "they quantify the size of that feature’s contribution. The steps add up to the final predicted probability."
+                    )
+                    if align_note:
+                        caption += f"  \nℹ️ {align_note}"
+                    st.caption(caption)
 
                 except Exception as e:
                     st.warning(f"Could not compute SHAP explanation: {e}")
 
         except Exception as e:
             st.error(f"Failed to predict: {e}")
+
+
 
 # ============================================
 # Batch Scoring
